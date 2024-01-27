@@ -2,6 +2,7 @@
  * ---------------------------
  * Some of the code is basen on mm-implicit.c and CSAPP chapter 9.9.
  */
+
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,68 +35,138 @@
 
 /* --=[ block and other ]=-------------------------------------------- */
 
-/* ciekawostka: arytmetyka na wskaźnikach różnych typów, to ciągłe bawienie się
- * w rzutowanie typów wskaźników :) */
+typedef int32_t word_t; /* Heap is bascially an array of 4-byte words. */
 
-typedef struct {
+/* [allocated block]
+ * word_t header
+ *      31--Block Size--3-0-b-a
+ *      where: a = 0 --> current block is free
+ *             a = 1 --> current block is allocated
+ *             b = 0 --> previous block is free
+ *             b = 1 --> previous block is allocated
+ * payload of requested size
+ * (optional) padding 
+ */
 
-  /* 31--Current Block Size--3--0--0--a,
-   * where a can be 1-allocated or 0-free */
-  int32_t header;
+/* [free block]
+ * word_t header
+ *      31--Block Size--3-0-b-a
+ *      where: a = 0 --> current block is free
+ *             b = 0 --> previous block is free
+ *             b = 1 --> previous block is allocated
+ * empty payload
+ * word_t footer
+ *      31--Block Size--3-0-b-a
+ *      where: a = 0 --> current block is free
+ *             b = 0 --> previous block is free
+ *             b = 1 --> previous block is allocated
+ */
 
-  /* 31--Prev Block Size--3--0--0--b,
-   * where b can be 1-allocated or 0-free */
-  int32_t footer;
-
-  /*
-   * We don't know what the size of the payload will be, so we will
-   * declare it as a zero-length array. This allow us to obtain a
-   * pointer to the start of the payload.
-   */
-  uint8_t payload[];
-} block_t;
-
-static void *heap_start;   /* Address of the first block */
-static void *heap_end;     /* Address past last byte of last block */
-/* static word_t *last; */ /* Points at last block */
+static word_t *heap_start;   /* Address of the first block */
+static word_t *heap_end;     /* Address past last byte of last block */
+/* static word_t *last;  */       /* Points at last block */
 
 typedef enum {
   FREE = 0,     /* Block is free */
   USED = 1,     /* Block is used */
-  PREVFREE = 2, /* Previous block is free (optimized boundary tags) */
+  PREV = 2, /* Previous block is free (optimized boundary tags) */
 } bt_flags;
 
 #define EXTEND_SIZE (1 << 9)
 #define test false
 
-/* --=[ basic procedures ]=-------------------------------------------- */
+/* --=[ basic procedures for code clarity ]=-------------------------------------------- */
 
-static size_t round_up(size_t size) {
+static inline size_t round_up(size_t size) {
   return (size + ALIGNMENT - 1) & -ALIGNMENT;
 }
 
-static bool is_allocated(block_t *block) {
-  return block->header & USED;
+static inline bool is_allocated(word_t *tag) {
+  return *tag & USED;
 }
 
-static bool is_prev_allocated(block_t *block) {
-  return block->footer & USED;
+static inline bool is_prev_allocated(word_t *tag) {
+  return *tag & PREV;
 }
 
-static size_t get_size(block_t *block) {
-  return block->header & -2;
+static inline size_t get_size(word_t *tag) {
+  return *tag & -4;
 }
 
-static size_t get_prev_size(block_t *block) {
-  return block->footer & -2;
+static inline void print_tag(word_t *tag){
+  printf("%ld | %d | %d\n", get_size(tag), is_prev_allocated(tag), is_allocated(tag));
 }
 
-static void set_header(block_t *block, size_t size, bool is_allocated) {
-  block->header = size | is_allocated;
+/* ------------------------------------------------------------------------------------- */
+
+static inline void set_size(word_t *tag, size_t size){
+  *tag = size | (is_prev_allocated(tag)<<1) | is_allocated(tag);
 }
 
-static void set_footer(block_t *block, size_t size, bool is_allocated) {
-  block->footer = size | is_allocated;
+static inline void set_tag(word_t *tag, size_t size, bool is_prev_allocated, bool is_allocated) {
+  *tag = size | (is_prev_allocated<<1) | is_allocated;
+}
+
+static inline void set_allo(word_t *tag){
+  *tag |= USED;
+}
+
+static inline void clear_allo(word_t *tag){
+  if(tag)
+    *tag &= ~USED;
+}
+
+static inline void set_prev_allo(word_t *tag){
+  *tag |= PREV;
+}
+
+static inline void clear_prev_allo(word_t *tag){
+  if(tag)
+    *tag &= ~PREV;
+}
+
+/* ------------------------------------------------------------------------------------- */
+
+/* Given payload pointer returns an address of boundary tag. */
+static inline word_t *payload_to_tag(void *ptr) {
+  return (word_t *)ptr - 1;
+}
+
+/* Given boundary tag pointer returns an address of payload. */
+static inline word_t *tag_to_payload(word_t *tag) {
+  return tag+1;
+}
+
+/* Returns address of next block or NULL. */
+static inline word_t *tag_next(void *tag) {
+  word_t *next_tag = tag + get_size(tag);
+  if (next_tag != heap_end)
+    return next_tag;
+  return NULL;
+}
+
+/* Returns address of previous block or NULL. */
+static inline word_t *tag_prev(void *tag) {
+  if(is_prev_allocated(tag))
+    return NULL;
+
+  word_t *prev_tag = tag - get_size((word_t *)tag-1);
+  return prev_tag;
+}
+
+/* ------------------------------------------------------------------------------------- */
+
+static void create_free_block(word_t *tag, size_t size, bool is_prev_allocated){
+  /* create header */
+  set_tag(tag, size, is_prev_allocated, FREE);
+
+  /* create footer */
+  set_tag((void *)tag+size-sizeof(word_t), size, is_prev_allocated, FREE);
+}
+
+static void create_allo_block(word_t *tag, size_t size, bool is_prev_allocated){
+  /* create header */
+  set_tag(tag, size, is_prev_allocated, USED);
 }
 
 static void *morecore(size_t size) {
@@ -108,16 +179,34 @@ static void *morecore(size_t size) {
 /* --=[ init ]=-------------------------------------------- */
 /*
  * mm_init - Called when a new trace starts.
+ * We make initial padding, so the first payload start at ALIGNMENT. 
+ * Then we remember the address of the first block of user data and where does the heap end.
+ * We create guardian angel - footer of empty, allocated block.
  */
+/* -------------------------------------------------------- */
+
 int mm_init(void) {
   /* Pad heap start so first payload is at ALIGNMENT. */
-  void *ptr = morecore(ALIGNMENT - offsetof(block_t, payload));
+  void *ptr = morecore(ALIGNMENT - sizeof(word_t));
   if (!ptr)
     return -1;
 
-  /* we need to know, where does the heap start */
-  heap_start = ptr + ALIGNMENT - offsetof(block_t, payload);
+  /* we need to know, where is the first block and where does the heap end */
+  heap_start = ptr + ALIGNMENT - sizeof(word_t);
   heap_end = heap_start;
+
+  if (test) 
+    printf("heap_start: %p\n", heap_start);
+
+  /* make guardian angel boundary tag before first user data block */
+  set_tag(heap_start-1, sizeof(word_t), USED, USED);
+
+  if (test)
+  {
+    printf("Guardian angel header: ");
+    print_tag(heap_start-1);
+    printf("\n\n");
+  }
 
   return 0;
 }
@@ -125,51 +214,66 @@ int mm_init(void) {
 /* --=[ malloc ]=-------------------------------------------- */
 /*
  * malloc - Find first good fit and allocate block there. Extend the heap if
- * necessary. Always allocate a block whose size is a multiple of the alignment.
+ * necessary. Always allocate a block whose size is a multiple of the ALIGNMENT.
+ */
+/* ---------------------------------------------------------- */
+
+/*
+ * find_fit - Find first good match. We start searching from the first data block.
+ * If we don't find any fit, we extend the heap.
  */
 
-static block_t *find_fit(size_t rqsize) {
+static word_t *find_fit(size_t rqsize) {
   if (test)
     printf("find_fit\n");
+
   void *ptr = heap_start;
-  void *prev = ptr;
-  /* find first fit */
-  /* not passed end   &&  (allocated already  ||   too small) */
-  while ((ptr < heap_end) &&
-         ((is_allocated(ptr)) || (get_size(ptr) < rqsize))) {
+  void *prev = (word_t *)ptr-1;
+
+  if((word_t *)ptr == heap_end)
+    ptr = NULL;
+
+  /* find first fit
+   * not passed end && (allocated already || too small) */
+  while (ptr && (is_allocated(ptr) || (get_size(ptr) < rqsize))){
     prev = ptr;
-    ptr = ptr + get_size(ptr);
+    ptr = tag_next(ptr);
   }
 
   if (test)
-    printf("ptr after loop: %p\n", ptr);
-  if (test)
-    printf("header of ptr: %ld | %d\n", get_size(ptr), is_allocated(ptr));
-  if (test)
+  {
+    if(ptr)
+    {
+      printf("ptr after loop: %p\n", ptr);
+      printf("header of ptr: ");
+      print_tag(ptr);
+    }
+    else
+      printf("ptr == heap end\n");
+
     printf("heap_end | heap_size : %p | %ld\n", heap_end, mem_heapsize());
-  if (test)
     printf("end of heap: %p\n", mem_heap_hi());
+  }
 
   /* if we didn't find any fit - allocate new memory and make free block_t */
-  if (ptr == heap_end) {
+  if (!ptr) {
+    /* extend heap */
     size_t ext = (rqsize <= EXTEND_SIZE) ? EXTEND_SIZE : rqsize;
     ptr = morecore(ext);
     if (!ptr)
       return (void *)-1;
 
-    heap_end += ext;
+    /* update heap_end */
+    heap_end = mem_heap_hi() + 1;
+    
     if (test)
-      printf(
-        "after allocating new heap memory - heap_end | heap_size : %p | %ld\n",
-        heap_end, mem_heapsize());
-    if (test)
+    {
+      printf("after allocating new heap memory - heap_end | heap_size : %p | %ld\n",heap_end, mem_heapsize());
       printf("end of heap: %p\n", mem_heap_hi());
-    set_header(ptr, ext, FREE);
-
-    if (ptr == heap_start)
-      set_footer(ptr, 0, USED);
-    else
-      set_footer(ptr, get_size(prev), is_allocated(prev));
+    }
+    
+    /* create empty block on the extended heap space */
+    create_free_block(ptr, ext, is_allocated(prev));
   }
 
   if (test)
@@ -180,74 +284,78 @@ static block_t *find_fit(size_t rqsize) {
 
 /* -------------------------------------------- */
 
-static void place(block_t *block, size_t size) {
+/* place - We found a fit in find_fit, now we have to allocate block there.
+ * We split the fit into allocated and free block if it's possible.
+ */
+
+static void place(word_t *tag, size_t size) {
   if (test)
     printf("place\n");
-  size_t split_size = get_size(block) - size;
+  
+  /* we need to check if we can split this block */
+  size_t split_size = get_size(tag) - size;
 
-  /* remember next block */
-  void *next = (void *)block + get_size(block);
   if (test)
-    printf("next block: %p\n", next);
-  /* default option: we can split */
-  size_t next_size = split_size;
-  bool is_allo = FREE;
+    printf("split_size: %ld\n", split_size);
 
   /* we can split, if split_size is >= minimal word size (== ALIGNMENT)*/
   if (split_size >= ALIGNMENT) {
-    /* make new free block after allocated block right now */
-    void *new_free = (void *)block + size;
-    set_header(new_free, split_size, FREE);
-    set_footer(new_free, size, USED);
+    /* make new free block after allocated block */
+    void *new_free = (void *)tag + size;
+    create_free_block(new_free, split_size, USED);
+
     if (test)
-      printf("new free block: %ld | %d\n", get_size(new_free),
-             is_allocated(new_free));
+    {
+      printf("new free block: ");
+      print_tag(new_free);
+    }
 
     /* make allocated block */
-    set_header(block, size, USED);
+    create_allo_block(tag, size, is_prev_allocated(tag));
   }
   /* we do not split otherwise */
-  else {
-    set_header(block, get_size(block), USED);
-    /* change update info for footer of next block */
-    next_size = get_size(block);
-    is_allo = USED;
+  else
+  {
+    /* just mark block as USED */
+    set_allo(tag);
+
+    /* update header of next block */
+    if (tag_next(tag))
+      set_prev_allo(tag_next(tag));
   }
 
-  /* update footer of next block */
-  if (next != heap_end)
-    set_footer(next, next_size, is_allo);
-
   if (test)
-    printf("header of block: %ld | %d\n", get_size(block), is_allocated(block));
-
-  if (next != heap_end)
-    if (test)
-      printf("footer of next block: %ld | %d\n", get_size(next),
-             is_allocated(next));
-
-  if (test)
+  {
+    printf("header of block: ");
+    print_tag(tag);
     printf("end place\n");
+  }
 }
 
 /* -------------------------------------------- */
 
 void *malloc(size_t size) {
-  size = round_up(sizeof(block_t) + size);
   if (test)
     printf("malloc with size: %ld\n", size);
 
-  block_t *block = find_fit(size);
-  if ((long)block < 0)
+  size = round_up(sizeof(word_t) + size);
+  
+  if (test)
+    printf("malloc with round-up size: %ld\n", size);
+
+  word_t *tag = find_fit(size);
+  if ((long)tag < 0)
     return NULL;
 
-  place(block, size);
+  place(tag, size);
 
   if (test)
+  {
     printf("end of heap: %p\n", mem_heap_hi());
-  if (test)
-    printf("\n\n");
-  return block->payload;
+    printf("tag | payload : %p | %p\n\n\n", tag, tag_to_payload(tag));
+  }
+
+  return tag_to_payload(tag);
 }
 
 /* --=[ free ]=-------------------------------------------- */
@@ -255,72 +363,83 @@ void *malloc(size_t size) {
  * free - Maybe we shouldn't ignore it... Let's try to free some space.
  * We coalesce every time we free a block.
  */
-void free(void *ptr) {
-  if (test)
-    printf("free with ptr: %p\n", ptr);
+/* -------------------------------------------------------- */
 
+void free(void *ptr) {
   if (!ptr)
     return;
 
-  /* ptr is pointing to PAYLOAD so we just need to move it to the header of
-   * block :D */
-  ptr -= offsetof(block_t, payload);
+  /* ptr is pointing to PAYLOAD so we just need to move it to the header of the block :D */
+  ptr = payload_to_tag(ptr);  
 
   if (test)
-    printf("ptr: %p\n", ptr);
-  if (test)
-    printf("header of block: %ld | %d\n", get_size(ptr), is_allocated(ptr));
-  if (test)
-    printf("footer of block: %ld | %d\n", get_prev_size(ptr),
-           is_prev_allocated(ptr));
-  if (test)
-    printf("header of next block: %ld | %d\n", get_size(ptr + get_size(ptr)),
-           is_allocated(ptr + get_size(ptr)));
+  {
+    printf("free with ptr: %p\n", ptr);
+    printf("header of block: ");
+    print_tag(ptr);
+
+    if(tag_next(ptr))
+    {
+      printf("header of next block: ");
+      print_tag(tag_next(ptr));
+    }
+    else
+      printf("next block == heap end\n");
+  }
 
   /* free current block before coalesce */
-  set_header(ptr, get_size(ptr), FREE);
+  create_free_block(ptr, get_size(ptr), is_prev_allocated(ptr));
 
-  /* if the next block is free  and not heap_end */
-  if ((ptr + get_size(ptr) != heap_end) && !is_allocated(ptr + get_size(ptr)))
-    set_header(ptr, get_size(ptr) + get_size(ptr + get_size(ptr)), FREE);
+  /* if the next block is not heap end and is free */
+  if (tag_next(ptr) && !is_allocated(tag_next(ptr)))
+    create_free_block(ptr, get_size(ptr) + get_size(tag_next(ptr)), is_prev_allocated(ptr));
 
   if (test)
+  {
     printf("after next block check\n");
-  if (test)
-    printf("header of block: %ld | %d\n", get_size(ptr), is_allocated(ptr));
+    printf("header of block: ");
+    print_tag(ptr);
+  }
 
   /* if the previous block is free */
   if (!is_prev_allocated(ptr))
-    set_header(ptr - get_prev_size(ptr), get_prev_size(ptr) + get_size(ptr),
-               FREE);
+    create_free_block(tag_prev(ptr), get_size(ptr) + get_size(tag_prev(ptr)), is_prev_allocated(tag_prev(ptr)));
 
   if (test)
+  {
     printf("after prev block check\n");
-  if (test)
-    printf("header of block: %ld | %d\n", get_size(ptr), is_allocated(ptr));
+    printf("header of block: ");
+    print_tag(ptr);
+  }
 
-  /* change footer of next block */
-  if (ptr + get_size(ptr) != heap_end)
-    set_footer(ptr + get_size(ptr), get_size(ptr), FREE);
-
-  if (test)
-    printf("footer of next block: %ld | %d\n",
-           get_prev_size(ptr + get_size(ptr)),
-           is_prev_allocated(ptr + get_size(ptr)));
+  /* change header of next block */
+  if (tag_next(ptr))
+    clear_prev_allo(tag_next(ptr));
 
   if (test)
+  {
+    if(tag_next(ptr))
+    {
+      printf("header of next block: ");
+      print_tag(tag_next(ptr));
+    }
+    else
+      printf("next block == heap end\n");
+
     printf("\n\n");
+  }
 }
 
 /* --=[ realloc ]=-------------------------------------------- */
 /*
- * realloc - Change the size of the block by mallocing a new block,
- *      copying its data, and freeing the old block.
+ * realloc - Change the size of the block. First we check, if we can just extend current block.
+ * If not, we find a new fit with malloc.
  **/
+/* ----------------------------------------------------------- */
+
 void *realloc(void *old_ptr, size_t size) {
   if (test)
-    printf("realloc with ptr and size: %p | %ld\n",
-           old_ptr - offsetof(block_t, payload), size);
+    printf("realloc with ptr and size: %p | %ld\n", payload_to_tag(old_ptr), size);
 
   /* If size == 0 then this is just free, and we return NULL. */
   if (size == 0) {
@@ -333,37 +452,45 @@ void *realloc(void *old_ptr, size_t size) {
     return malloc(size);
 
   /* we got pointer to PAYLOAD! */
-  void *ptr = old_ptr - offsetof(block_t, payload);
+  void *ptr = payload_to_tag(old_ptr);
 
   /* we need to keep alignment happy */
-  size_t rqsize = round_up(sizeof(block_t) + size);
-  if (test)
-    printf("size after round_up: %ld\n", rqsize);
+  size_t rqsize = round_up(sizeof(word_t) + size); 
 
-  /* we do not shrink blocks! */
+  /* we do not shrink blocks - it's not worth it */
   if (rqsize <= get_size(ptr))
     return old_ptr;
 
   if (test)
-    printf("current block: %ld | %d\n", get_size(ptr), is_allocated(ptr));
-  if (test)
-    printf("next block: %ld | %d\n", get_size(ptr + get_size(ptr)),
-           is_allocated(ptr + get_size(ptr)));
+  {
+    printf("size after round_up: %ld\n", rqsize);
+    printf("current block: ");
+    print_tag(ptr);
+
+    if(tag_next(ptr))
+    {
+      printf("header of next block: ");
+      print_tag(tag_next(ptr));
+    }
+    else
+      printf("next block == heap end\n");
+  }
 
   /* check if we can just extend existing block */
-  /* if next block is not heap_end and is not allocated yet and there is enough
-   * space */
-  if ((ptr + get_size(ptr) != heap_end) && !is_allocated(ptr + get_size(ptr)) &&
-      (get_size(ptr) + get_size(ptr + get_size(ptr)) > rqsize)) {
+  /* if next block is not heap_end and is free and there is enough space */
+  if (tag_next(ptr) && (!is_allocated(tag_next(ptr))) && (get_size(ptr) + get_size(tag_next(ptr)) > rqsize)) {
     if (test)
       printf("next block is free!\n");
-    set_header(ptr, get_size(ptr) + get_size(ptr + get_size(ptr)), USED);
+
+    set_size(ptr, get_size(ptr) + get_size(tag_next(ptr)));
     place(ptr, rqsize);
+    
     return old_ptr;
   }
 
   if (test)
     printf("we need to find new block...\n");
+  
   /* we can't extend existing block - we need to find new block */
   void *new_ptr = malloc(size);
 
@@ -372,11 +499,7 @@ void *realloc(void *old_ptr, size_t size) {
     return NULL;
 
   /* Copy the old data. */
-  block_t *block = old_ptr - offsetof(block_t, payload);
-  size_t old_size = get_size(block);
-  if (size < old_size)
-    old_size = size;
-  memcpy(new_ptr, old_ptr, old_size);
+  memcpy(new_ptr, old_ptr, get_size(ptr));
 
   /* Free the old block. */
   free(old_ptr);
@@ -390,8 +513,10 @@ void *realloc(void *old_ptr, size_t size) {
 /* --=[ calloc ]=-------------------------------------------- */
 /*
  * calloc - Allocate the block and set it to zero.
- * Leave it be - it's awesome :D
+ * I leave it be - it's awesome :D
  */
+/* ---------------------------------------------------------- */
+
 void *calloc(size_t nmemb, size_t size) {
   if (test)
     printf("calloc with size: %ld\n", size);
@@ -412,7 +537,22 @@ void *calloc(size_t nmemb, size_t size) {
 /*
  * mm_checkheap - So simple, it doesn't need a checker!
  */
+/* ------------------------------------------------------------- */
+
 void mm_checkheap(int verbose) {
   if (test)
     printf("checkheap\n\n");
+
+  if(verbose)
+  {
+    word_t *start = heap_start;
+    printf("\n\n\n");
+    while (start)
+    {
+      printf("address: %p | ", start);
+      print_tag(start);
+      start = tag_next(start);
+    }
+    printf("\n\n\n");
+  }
 }
