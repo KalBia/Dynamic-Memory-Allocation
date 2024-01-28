@@ -8,14 +8,14 @@
  *
  * Idea:
  *  We use optimized boundary tags with address ordered explicit free list.
- * 
+ *
  * ---------------------------
- * 
+ *
  * Pointers:
  *  We want pointers in free blocks to use only 4 bytes, so we need to
  *  realize that we will never use upper 4 bytes of addresses.
  *  We can store only distance from mem_heap_lo()!
- * 
+ *
  *  relative address: distance from mem_heap_lo().
  *  real address: address normally stored by pointer.
  *
@@ -50,65 +50,66 @@
  *             b = 1 --> previous block is allocated
  *
  * ----------------------------
- * 
+ *
  * Guardian Angels:
- * 
+ *
  *  Thanks to them we don't need to handle corner cases in some situations.
- *  
+ *
  *  starting guardian: one word_t before heap_start
  *      - size in header: 0
  *      - marked as allocated
- * 
+ *
  *  ending guardian: at the address of heap_end
  *      - size in header: 0
  *      - marked as allocated
- *      - holds information about allocation of last block in heap. We use it 
+ *      - holds information about allocation of last block in heap. We use it
  *        when extending the heap.
- * 
+ *
  * ----------------------------
- * 
+ *
  * Explicit free list:
- * 
+ *
  *  start of the list: free_start
  *        address: two word_t before heap_start
- *  
+ *
  *  end of the list: mem_heap_lo()
- *        why? Its address does not change during execution of the program, 
+ *        why? Its address does not change during execution of the program,
  *             so it can be used as ending point.
  *             Easy to check in loops as ending condition.
- * 
+ *
  * ----------------------------
  *
  * Allocating memory:
- *  
+ *
  *  We loop through address ordered explicit free list. We stop at first fit,
  *  first free block that has size greater or equal than required size.
- *  
- *  If the size of found block is big enough to split 
+ *
+ *  If the size of found block is big enough to split
  *      size of free block - required size >= ALIGNMENT
  *  than we can allocate the block of required size and make new free block from
  *  the rest of the old free block.
- * 
- *  We erase old free block from explicit list and optionally add new free block 
+ *
+ *  We erase old free block from explicit list and optionally add new free block
  *  created with splitting.
- * 
+ *
  * ----------------------------
- * 
+ *
  * Freeing memory:
- * 
- *  We check if we can coalesce current block with next or previous block. 
+ *
+ *  We check if we can coalesce current block with next or previous block.
  *  We do it every time we free any block of memory.
- * 
+ *
  *  We erase free "neighbors" of current block from list and add new bigger
  *  block at the end.
- * 
+ *
  * ---------------------------
- * 
+ *
  * Reallocating memory:
- * 
- *  First we check, if we can just extend current block - if the next block is free and big enough. 
- *  If not, we find a new fit with malloc and copy the data to the new place.
- * 
+ *
+ *  First we check, if we can just extend current block - if the next block is
+ * free and big enough. If not, we find a new fit with malloc and copy the data
+ * to the new place.
+ *
  * ---------------------------
  */
 
@@ -301,7 +302,7 @@ static inline word_t *free_prev(word_t *tag) {
 
 /* sets relative pointer to prev free block in block 'tag' to 'new' */
 static inline void set_prev_free(word_t *tag, word_t new) {
-  if(tag != mem_heap_lo())
+  if (tag != mem_heap_lo())
     *(tag + 1) = new;
 }
 
@@ -333,8 +334,7 @@ static void push_new_free(word_t *tag) {
   word_t *prev = free_start;
 
   /* while not end of list && address is lower than address of 'tag' */
-  while ((next != mem_heap_lo()) && (next < tag))
-  {
+  while ((next != mem_heap_lo()) && (next < tag)) {
     prev = next;
     next = free_next(next);
   }
@@ -391,15 +391,15 @@ int mm_init(void) {
 
 /* --=[ malloc ]=----------------------------------- */
 /*
- * malloc - Find first fit in address ordered explicit free list and allocate block there.
- * Extend the heap if necessary.
- * Always allocate a block whose size is a multiple of the ALIGNMENT.
+ * malloc - Find first fit in address ordered explicit free list and allocate
+ * block there. Extend the heap if necessary. Always allocate a block whose size
+ * is a multiple of the ALIGNMENT.
  */
 /* ------------------------------------------------- */
 
 /*
- * find_fit - Find first good match. We use explicit free list with adrress ordering.
- * If we don't find any fit, we extend the heap.
+ * find_fit - Find first good match. We use explicit free list with adrress
+ * ordering. If we don't find any fit, we extend the heap.
  */
 
 static word_t *find_fit(size_t rqsize) {
@@ -480,7 +480,6 @@ static void place(word_t *tag, size_t size, bool is_malloc_call) {
    *    erase free block from the explicit list */
   if (is_malloc_call)
     erase_free_block(tag);
-
 }
 
 /* -------------------------------------------- */
@@ -540,7 +539,6 @@ void free(void *ptr) {
 
   /* change header of next block */
   clear_prev_allo(tag_next(ptr));
-
 }
 
 /* --=[ realloc ]=---------------------------------------- */
@@ -633,7 +631,7 @@ void *calloc(size_t nmemb, size_t size) {
 /* -------------------------------------------------------- */
 
 void mm_checkheap(int verbose) {
-  
+
   if (verbose) {
     printf("\n\nwhole heap:\n");
     word_t *start = heap_start;
