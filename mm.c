@@ -484,7 +484,7 @@ static void place(word_t *tag, size_t size, bool is_malloc_call) {
 
 /* -------------------------------------------- */
 
-void *malloc(size_t size) {
+void *malloc(size_t size) { 
   size = round_up(sizeof(word_t) + size);
 
   word_t *tag = find_fit(size);
@@ -626,13 +626,27 @@ void *calloc(size_t nmemb, size_t size) {
 
 /* --=[ checkheap ]=---------------------------------------- */
 /*
- * mm_checkheap - So simple, it doesn't need a checker!
+ * mm_checkheap - I would love to say, that it's that simple as before...
+ * 
+ * Numbers before invariants shows further in the code when are they checked.
+ *
+ * How it should be?
+ *  1. Every block is correctly alligned to ALIGNMENT.
+ *  2. Every header and footer of free block are the same.
+ *  3.1. Every free block is on the free list.
+ *  3.2. Every block on free list is marked as free and belongs to heap.
+ *  3.3. Blocks on free list are sorted by address.
+ *  3.4. Every free block has correct pointer to next block.
+ *  4. No free block is adjacent to another free block.
+ *  5. Every free block has correct pointer to previous block.
  */
 /* -------------------------------------------------------- */
 
 void mm_checkheap(int verbose) {
 
   if (verbose) {
+    /* Print whole heap - every block with it's addres, size, 
+     * allocation and prev_allocation. */
     printf("\n\nwhole heap:\n");
     word_t *start = heap_start;
     while (start != heap_end) {
@@ -641,8 +655,11 @@ void mm_checkheap(int verbose) {
     }
     printf("\n\n");
 
+    /* Print only explicit free list - with address, size,
+     * allocation and prev allocation.
+     * Additionally: address of prev and next free block on list. */
     printf("explicit list:\n");
-    start = free_start;
+    start = free_next(free_start);
     while (start != mem_heap_lo()) {
       print_tag(start);
       printf("prev: %p\n", ptr_to_tag(*(start + 1)));
@@ -651,4 +668,69 @@ void mm_checkheap(int verbose) {
     }
     printf("\n\n");
   }
+
+  /* check correctness of the whole heap */
+  word_t *every_block = heap_start;
+  word_t *free_block = free_next(free_start); /* first free block */
+  word_t *prev_free_block = free_start; /* needed to check if prev pointers are correct */
+
+  while((every_block != heap_end) && (free_block != mem_heap_lo())){
+    
+    /* 1. check if block is correctly alligned to ALIGNMENT */
+      /* payload address start at multiple of ALIGNMENT */
+    if ((int64_t)tag_to_payload(every_block) % ALIGNMENT != 0)
+    {
+      printf("block %p not aligned correctly (cause: payload address): %p\n", every_block, tag_to_payload(every_block));
+      return;
+    }
+
+      /* size is a multiple of ALIGNMENT */
+    if ((int64_t)get_size(every_block) % ALIGNMENT != 0)
+    {
+      printf("block %p not aligned correctly (cause: size): %ld\n", every_block, get_size(every_block));
+      return;
+    }
+
+    /* 2. check if header and footer of free block are the same */
+    if (!is_allocated(every_block) && *every_block != *(tag_next(every_block)-1))
+    {
+      printf("block %p has not matching footer and header\n", every_block);
+      return;
+    }
+
+    /* 3. check if the free block is on the list of free blocks */
+      /* We have them sorted by address on list, so the first free block
+       * in the loop should be the first block on the list as well. */
+    if (!is_allocated(every_block) && free_block != every_block)
+    {
+      printf("block %p is not on the list of free blocks, is not sorted or has incorrect next pointer\n", every_block);
+      return;
+    }
+
+    /* 4. check if the free block is a neighbour of another free block */
+      /* We have guardian angels, so we don't need to check corner cases. */
+    if (!is_allocated(every_block) && ( !is_prev_allocated(every_block) || !is_allocated(tag_next(every_block)) ))
+    {
+      printf("block %p is free and has a free neighbor\n", every_block);
+      return;
+    }
+
+    /* 5. check if free block has correct pointer to previous free block */
+    if (free_prev(free_block) != prev_free_block)
+    {
+      printf("block %p has incorrect pointer to previous free block\n", free_block);
+      return;
+    }
+
+    /* if block was free move to next free block on list and update prev free */
+    if (!is_allocated(every_block))
+    {
+      prev_free_block = free_block;
+      free_block = free_next(free_block);
+    }
+
+    /* move to next block */
+    every_block = tag_next(every_block);
+  }
+
 }
