@@ -1,14 +1,23 @@
-/* KALINA BIAŁEK, 340152
- * ---------------------------
-
- * Some of the code is based on mm-implicit.c and CSAPP chapter 9.9.
-
+/* ---------------------------
+ * KALINA BIAŁEK, 340152
  * ---------------------------
  *
- * Observation:
- *  we want pointers in free blocks to use only 4 bytes, so
- *  we can realize, that we will never use upper 4 bytes of addresses.
- *  We can store only distance from heap_start!
+ * Some of the code is based on mm-implicit.c and CSAPP chapter 9.9.
+ *
+ * ---------------------------
+ *
+ * Idea:
+ *  We use optimized boundary tags with address ordered explicit free list.
+ * 
+ * ---------------------------
+ * 
+ * Pointers:
+ *  We want pointers in free blocks to use only 4 bytes, so we need to
+ *  realize that we will never use upper 4 bytes of addresses.
+ *  We can store only distance from mem_heap_lo()!
+ * 
+ *  relative address: distance from mem_heap_lo().
+ *  real address: address normally stored by pointer.
  *
  * ------------------------------
  *
@@ -21,8 +30,8 @@
  *             a = 1 --> current block is allocated
  *             b = 0 --> previous block is free
  *             b = 1 --> previous block is allocated
- * payload of requested size
- * (optional) padding
+ *  payload of requested size
+ *  (optional) padding
  *
  * [free block]
  *  word_t header
@@ -41,8 +50,66 @@
  *             b = 1 --> previous block is allocated
  *
  * ----------------------------
+ * 
+ * Guardian Angels:
+ * 
+ *  Thanks to them we don't need to handle corner cases in some situations.
+ *  
+ *  starting guardian: one word_t before heap_start
+ *      - size in header: 0
+ *      - marked as allocated
+ * 
+ *  ending guardian: at the address of heap_end
+ *      - size in header: 0
+ *      - marked as allocated
+ *      - holds information about allocation of last block in heap. We use it 
+ *        when extending the heap.
+ * 
+ * ----------------------------
+ * 
+ * Explicit free list:
+ * 
+ *  start of the list: free_start
+ *        address: two word_t before heap_start
+ *  
+ *  end of the list: mem_heap_lo()
+ *        why? Its address does not change during execution of the program, 
+ *             so it can be used as ending point.
+ *             Easy to check in loops as ending condition.
+ * 
+ * ----------------------------
  *
- *
+ * Allocating memory:
+ *  
+ *  We loop through address ordered explicit free list. We stop at first fit,
+ *  first free block that has size greater or equal than required size.
+ *  
+ *  If the size of found block is big enough to split 
+ *      size of free block - required size >= ALIGNMENT
+ *  than we can allocate the block of required size and make new free block from
+ *  the rest of the old free block.
+ * 
+ *  We erase old free block from explicit list and optionally add new free block 
+ *  created with splitting.
+ * 
+ * ----------------------------
+ * 
+ * Freeing memory:
+ * 
+ *  We check if we can coalesce current block with next or previous block. 
+ *  We do it every time we free any block of memory.
+ * 
+ *  We erase free "neighbors" of current block from list and add new bigger
+ *  block at the end.
+ * 
+ * ---------------------------
+ * 
+ * Reallocating memory:
+ * 
+ *  First we check, if we can just extend current block - if the next block is free and big enough. 
+ *  If not, we find a new fit with malloc and copy the data to the new place.
+ * 
+ * ---------------------------
  */
 
 #include <assert.h>
@@ -90,7 +157,6 @@ typedef enum {
 } bt_flags;
 
 #define EXTEND_SIZE (1 << 9)
-#define test false
 
 /* --=[ boundary tags ]=-------------------------- */
 
@@ -156,13 +222,13 @@ static inline word_t *tag_to_payload(word_t *tag) {
   return tag + 1;
 }
 
-/* Returns address of next block or NULL. */
+/* Returns address of next block. */
 static inline word_t *tag_next(void *tag) {
   word_t *next_tag = tag + get_size(tag);
   return next_tag;
 }
 
-/* Returns address of previous block or NULL. */
+/* Returns address of previous block. */
 static inline word_t *tag_prev(void *tag) {
   if (is_prev_allocated(tag))
     return NULL;
@@ -199,21 +265,25 @@ static void *morecore(size_t size) {
   return ptr;
 }
 
-/* --=[ explicit list ]=----------------------------------- */
+/* --=[ explicit free list ]=----------------------------------- */
 
 /* We want pointers in free blocks to use only 4 bytes.
  * We will never use upper 4 bytes because of max range of heap.
- * So we can store only distance from heap_start! */
+ * So we can store only distance from mem_heap_lo()!
+ * We call it further "relative address".
+ * The "real address" will be the address that pointer would store. */
 
+/* given relative address returns real address */
 static inline word_t *ptr_to_tag(word_t ptr) {
   return (void *)mem_heap_lo() + ptr;
 }
 
+/* given real address returns relative address */
 static inline word_t tag_to_ptr(word_t *tag) {
   return (word_t)((int64_t)tag & 0x00000000FFFFFFFF);
 }
 
-/* get the tag of the next free block */
+/* returns the tag of the next free block */
 static inline word_t *free_next(word_t *tag) {
   if (tag == free_start)
     return ptr_to_tag(*tag);
@@ -221,7 +291,7 @@ static inline word_t *free_next(word_t *tag) {
   return ptr_to_tag(*(tag + 2));
 }
 
-/* get the tag of the previous free block */
+/* returns the tag of the previous free block */
 static inline word_t *free_prev(word_t *tag) {
   if (tag == free_start)
     return NULL;
@@ -229,14 +299,21 @@ static inline word_t *free_prev(word_t *tag) {
   return ptr_to_tag(*(tag + 1));
 }
 
+/* sets relative pointer to prev free block in block 'tag' to 'new' */
 static inline void set_prev_free(word_t *tag, word_t new) {
-  *(tag + 1) = new;
+  if(tag != mem_heap_lo())
+    *(tag + 1) = new;
 }
 
+/* sets relative pointer to next free block in block 'tag' to 'new' */
 static inline void set_next_free(word_t *tag, word_t new) {
-  *(tag + 2) = new;
+  if (tag != free_start)
+    *(tag + 2) = new;
+  else
+    *free_start = new;
 }
 
+/* reconnect "pipes" so they skip block 'tag' in explicit free list */
 static void erase_free_block(word_t *tag) {
   if (free_prev(tag) == free_start)
     *free_start = *(tag + 2);
@@ -247,18 +324,32 @@ static void erase_free_block(word_t *tag) {
     set_prev_free(free_next(tag), *(tag + 1));
 }
 
+/* [address ordered explicit list]
+ * We loop through list to find the first free block with address
+ * higher than block 'tag'.
+ * It can't be equal - we don't store duplicates of free blocks. */
 static void push_new_free(word_t *tag) {
-  /* "pipe" from new first to old first */
-  set_next_free(tag, *free_start);
+  word_t *next = ptr_to_tag(*free_start);
+  word_t *prev = free_start;
 
-  /* "pipe" from new first to free start" */
-  set_prev_free(tag, tag_to_ptr(free_start));
+  /* while not end of list && address is lower than address of 'tag' */
+  while ((next != mem_heap_lo()) && (next < tag))
+  {
+    prev = next;
+    next = free_next(next);
+  }
 
-  /* "pipe" from old first to new first */
-  set_prev_free(free_next(free_start), tag_to_ptr(tag));
+  /* "pipe" from new one to next on list */
+  set_next_free(tag, tag_to_ptr(next));
 
-  /* "pipe" from free start to new first */
-  *free_start = tag_to_ptr(tag);
+  /* "pipe" from new one to prev on list */
+  set_prev_free(tag, tag_to_ptr(prev));
+
+  /* "pipe" from prev on list to new one */
+  set_next_free(prev, tag_to_ptr(tag));
+
+  /* "pipe" from next on list to new one */
+  set_prev_free(next, tag_to_ptr(tag));
 }
 
 /* --=[ init ]=----------------------------------- */
@@ -267,9 +358,9 @@ static void push_new_free(word_t *tag) {
  * We make initial padding, so the first payload starts at ALIGNMENT.
  * Then we remember the address of the first block of user data and where does
  * the heap end. We create guardian angels - "allocated blocks" at the end
- * and beginning of the heap. We don't need to check this corner cases anymore.
+ * and beginning of the heap. We don't need to check some corner cases anymore.
  * We assume that heap ends at the start of guardian angel at the end.
- * We add starting pointer of the free blocks list (explicit list).
+ * We add starting pointer of the free blocks list (explicit free list).
  */
 /* ----------------------------------------------- */
 
@@ -295,55 +386,32 @@ int mm_init(void) {
   /* make guardian angel boundary tag after empty heap */
   set_tag(heap_end, 0, USED, USED);
 
-  if (test) {
-    printf("Guardian angel header: ");
-    print_tag(heap_start - 1);
-    printf("\n\n");
-  }
-
   return 0;
 }
 
 /* --=[ malloc ]=----------------------------------- */
 /*
- * malloc - Find first good fit in LIFO explicit list and allocate block there.
+ * malloc - Find first fit in address ordered explicit free list and allocate block there.
  * Extend the heap if necessary.
  * Always allocate a block whose size is a multiple of the ALIGNMENT.
  */
 /* ------------------------------------------------- */
 
 /*
- * find_fit - Find first good match. We use explicit free blocks list with LIFO.
+ * find_fit - Find first good match. We use explicit free list with adrress ordering.
  * If we don't find any fit, we extend the heap.
  */
 
 static word_t *find_fit(size_t rqsize) {
-  if (test)
-    printf("find_fit\n");
 
   word_t *ptr = ptr_to_tag(*free_start);
-
-  if (test)
-    printf("ptr: %p\n", ptr);
-
   /* find first fit
    * As said before - end of explicit list is marked as "pointer" to heap_lo.
-   *  not passed end of list && (allocated already || too small) */
+   *     (not passed end of list) &&
+   *      (allocated already || too small) */
   while ((ptr != mem_heap_lo()) &&
          (is_allocated(ptr) || (get_size(ptr) < rqsize)))
     ptr = free_next(ptr);
-
-  if (test) {
-    if (ptr != mem_heap_lo()) {
-      printf("ptr after loop: %p\n", ptr);
-      printf("header of ptr: ");
-      print_tag(ptr);
-    } else
-      printf("ptr == end of explicit list\n");
-
-    printf("heap_end | heap_size : %p | %ld\n", heap_end, mem_heapsize());
-    printf("end of heap: %p\n", mem_heap_hi());
-  }
 
   /* if we didn't find any fit - allocate new memory and make free block */
   if (ptr == mem_heap_lo()) {
@@ -361,29 +429,18 @@ static word_t *find_fit(size_t rqsize) {
      * allocated */
     bool was_allocated = is_prev_allocated(heap_end);
 
-    /* move guardian angel - prev is free, because we just created extra space
-     * ;) */
+    /* move guardian angel - prev is free, we just created extra space */
     set_tag((mem_heap_hi() + 1) - sizeof(word_t), 0, FREE, USED);
 
     /* update heap_end */
     heap_end = (mem_heap_hi() + 1) - sizeof(word_t);
 
-    if (test) {
-      printf(
-        "after allocating new heap memory - heap_end | heap_size : %p | %ld\n",
-        heap_end, mem_heapsize());
-      printf("end of heap: %p\n", mem_heap_hi());
-    }
-
     /* create empty block on the extended heap space */
     create_free_block(ptr, ext, was_allocated, 0, 0);
 
-    /* we put it at the beginning of explicit list */
+    /* push it to explicit free list */
     push_new_free(ptr);
   }
-
-  if (test)
-    printf("end find_fit\n");
 
   return ptr;
 }
@@ -395,14 +452,8 @@ static word_t *find_fit(size_t rqsize) {
  */
 
 static void place(word_t *tag, size_t size, bool is_malloc_call) {
-  if (test)
-    printf("place in tag: %p\n", tag);
-
   /* we need to check if we can split this block */
   size_t split_size = get_size(tag) - size;
-
-  if (test)
-    printf("split_size: %ld\n", split_size);
 
   /* we can split, if split_size is >= minimal word size (== ALIGNMENT)*/
   if (split_size >= ALIGNMENT) {
@@ -410,18 +461,13 @@ static void place(word_t *tag, size_t size, bool is_malloc_call) {
     void *new_free = (void *)tag + size;
     create_free_block(new_free, split_size, USED, 0, 0);
 
-    /* put new free block at the start of the list */
+    /* put new free block in the list */
     push_new_free(new_free);
-
-    if (test) {
-      printf("new free block: ");
-      print_tag(new_free);
-    }
 
     /* make allocated block */
     create_allo_block(tag, size, is_prev_allocated(tag));
   }
-  /* we do not split otherwise */
+  /* otherwise we do not split */
   else {
     /* just mark block as USED */
     set_allo(tag);
@@ -435,26 +481,12 @@ static void place(word_t *tag, size_t size, bool is_malloc_call) {
   if (is_malloc_call)
     erase_free_block(tag);
 
-  if (test)
-    printf("after erase\n");
-
-  if (test) {
-    printf("header of block: ");
-    print_tag(tag);
-    printf("end place\n");
-  }
 }
 
 /* -------------------------------------------- */
 
 void *malloc(size_t size) {
-  if (test)
-    printf("malloc with size: %ld\n", size);
-
   size = round_up(sizeof(word_t) + size);
-
-  if (test)
-    printf("malloc with round-up size: %ld\n", size);
 
   word_t *tag = find_fit(size);
   if ((long)tag < 0)
@@ -462,17 +494,13 @@ void *malloc(size_t size) {
 
   place(tag, size, true);
 
-  if (test) {
-    printf("end of heap: %p\n", mem_heap_hi());
-    printf("tag | payload : %p | %p\n\n\n", tag, tag_to_payload(tag));
-  }
-
   return tag_to_payload(tag);
 }
 
 /* --=[ free ]=--------------------------------------- */
 /*
- * free - Coalesce every time we free a block.
+ * free - Coalesce every time we free a block. Check both next
+ * and previous block for potential coalescing.
  */
 /* --------------------------------------------------- */
 
@@ -483,22 +511,6 @@ void free(void *ptr) {
   /* ptr is pointing to PAYLOAD so we just need to move it to the header of the
    * block :D */
   ptr = payload_to_tag(ptr);
-
-  if (test) {
-    printf("free with ptr: %p\n", ptr);
-    printf("header of block: ");
-    print_tag(ptr);
-
-    printf("header of next block: ");
-    print_tag(tag_next(ptr));
-
-    if (tag_prev(ptr)) {
-      printf("header of prev block: ");
-      print_tag(tag_prev(ptr));
-      printf("footer of prev block: ");
-      print_tag(ptr - sizeof(word_t));
-    }
-  }
 
   /* free current block before coalesce and assume we will add this block to
    * explicit list */
@@ -514,14 +526,8 @@ void free(void *ptr) {
     set_size(tag_next(ptr) - 1, get_size(ptr));
   }
 
-  if (test) {
-    printf("after next block check\n");
-    printf("header of block: ");
-    print_tag(ptr);
-  }
-
-  /* if the previous block is free -> change which block we add to explicit list
-   */
+  /* if the previous block is free
+        change which block we add to explicit list */
   if (!is_prev_allocated(ptr)) {
     erase_free_block(tag_prev(ptr));
     create_free_block(tag_prev(ptr), get_size(ptr) + get_size(tag_prev(ptr)),
@@ -532,33 +538,20 @@ void free(void *ptr) {
   /* add newly created free block to explicit list */
   push_new_free(add_to_list);
 
-  if (test) {
-    printf("after prev block check\n");
-    printf("header of block: ");
-    print_tag(ptr);
-  }
-
   /* change header of next block */
   clear_prev_allo(tag_next(ptr));
 
-  if (test) {
-    printf("header of next block: ");
-    print_tag(tag_next(ptr));
-    printf("\n\n");
-  }
 }
 
 /* --=[ realloc ]=---------------------------------------- */
 /*
  * realloc - Change the size of the block. First we check, if we can just extend
- *current block. If not, we find a new fit with malloc.
- **/
+ * current block. If not, we find a new fit with malloc and copy the data.
+ *
+ * */
 /* ------------------------------------------------------- */
 
 void *realloc(void *old_ptr, size_t size) {
-  if (test)
-    printf("realloc with ptr and size: %p | %ld\n", payload_to_tag(old_ptr),
-           size);
 
   /* If size == 0 then this is just free, and we return NULL. */
   if (size == 0) {
@@ -580,21 +573,10 @@ void *realloc(void *old_ptr, size_t size) {
   if (rqsize <= get_size(ptr))
     return old_ptr;
 
-  if (test) {
-    printf("size after round_up: %ld\n", rqsize);
-    printf("current block: ");
-    print_tag(ptr);
-
-    printf("header of next block: ");
-    print_tag(tag_next(ptr));
-  }
-
   /* check if we can just extend existing block */
-  /* if next block is free and there is enough space */
+  /* if (next block is free) and (there is enough space) */
   if ((!is_allocated(tag_next(ptr))) &&
       (get_size(ptr) + get_size(tag_next(ptr)) > rqsize)) {
-    if (test)
-      printf("next block is free!\n");
 
     erase_free_block(tag_next(ptr));
 
@@ -606,19 +588,10 @@ void *realloc(void *old_ptr, size_t size) {
 
     place(ptr, rqsize, false);
 
-    if (test)
-      printf("\n\n");
-
     return old_ptr;
   }
 
-  if (test)
-    printf("wassup?\n");
-
-  if (test)
-    printf("we need to find new block...\n");
-
-  /* we can't extend existing block - we need to find new block */
+  /* we can't extend existing block - we need to find new one */
   void *new_ptr = malloc(size);
 
   /* If malloc() fails, the original block is left untouched. */
@@ -631,31 +604,24 @@ void *realloc(void *old_ptr, size_t size) {
   /* Free the old block. */
   free(old_ptr);
 
-  if (test)
-    printf("\n\n");
-
   return new_ptr;
 }
 
 /* --=[ calloc ]=---------------------------------------- */
 /*
  * calloc - Allocate the block and set it to zero.
- * I leave it be - it's awesome :D
+ * I leave it be - it's awesome as it is :D
  */
 /* ------------------------------------------------------ */
 
 void *calloc(size_t nmemb, size_t size) {
-  if (test)
-    printf("calloc with size: %ld\n", size);
+
   size_t bytes = nmemb * size;
   void *new_ptr = malloc(bytes);
 
   /* If malloc() fails, skip zeroing out the memory. */
   if (new_ptr)
     memset(new_ptr, 0, bytes);
-
-  if (test)
-    printf("\n\n");
 
   return new_ptr;
 }
@@ -667,8 +633,9 @@ void *calloc(size_t nmemb, size_t size) {
 /* -------------------------------------------------------- */
 
 void mm_checkheap(int verbose) {
+  
   if (verbose) {
-    printf("whole heap:\n");
+    printf("\n\nwhole heap:\n");
     word_t *start = heap_start;
     while (start != heap_end) {
       print_tag(start);
@@ -681,6 +648,7 @@ void mm_checkheap(int verbose) {
     while (start != mem_heap_lo()) {
       print_tag(start);
       printf("prev: %p\n", ptr_to_tag(*(start + 1)));
+      printf("next: %p\n", ptr_to_tag(*(start + 2)));
       start = free_next(start);
     }
     printf("\n\n");
