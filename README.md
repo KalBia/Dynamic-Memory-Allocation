@@ -1,1 +1,11 @@
-[![Review Assignment Due Date](https://classroom.github.com/assets/deadline-readme-button-24ddc0f5d75046c5622901739e7c5dd533143b0c8e959d652212380cedb1ea36.svg)](https://classroom.github.com/a/xUD_Vt6f)
+## Dynamic Memory Allocation
+Technology: C\
+Type of project: from scratch, based on template
+
+### Rules of project
+Only the code in file mm.c is written from scratch by me. The professor provided everything else and the template.\
+
+### How to use it
+make - compile the project\
+make format - format all .c files\
+./grade - run tests given by the professor 
