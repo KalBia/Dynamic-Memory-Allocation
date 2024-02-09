@@ -1,8 +1,4 @@
-/* ---------------------------
- * KALINA BIAŁEK, 340152
- * ---------------------------
- *
- * Some of the code is based on mm-implicit.c and CSAPP chapter 9.9.
+/* Some of the code is based on mm-implicit.c and CSAPP chapter 9.9.
  *
  * ---------------------------
  *
